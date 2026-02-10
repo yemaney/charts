@@ -1,0 +1,46 @@
+services:
+  backend:
+    build: ./backend
+    ports:
+    - 8000:8000
+    depends_on:
+    - db
+    environment:
+    - POSTGRES_HOST=db
+    - POSTGRES_USER=user
+    - POSTGRES_PASSWORD=password
+    - POSTGRES_DB=dbt_workbench
+    - DBT_ARTIFACTS_PATH=/app/data/artifacts
+    - DBT_PROJECT_PATH=/app/data/repos/default
+    - BACKEND_PORT=8000
+    - SQL_WORKSPACE_DEFAULT_CONNECTION_URL=postgresql://user:password@db:5432/dbt_workbench
+    networks:
+    - dbt_workbench
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_BASE_URL: __API_URL_PLACEHOLDER__
+    ports:
+    - 3000:3000
+    depends_on:
+    - backend
+    networks:
+    - dbt_workbench
+    environment:
+    - VITE_API_BASE_URL=http://44.203.138.63:8000
+  db:
+    image: postgres:13
+    environment:
+    - POSTGRES_DB=dbt_workbench
+    - POSTGRES_USER=user
+    - POSTGRES_PASSWORD=password
+    volumes:
+    - postgres_data:/var/lib/postgresql/data
+    networks:
+    - dbt_workbench
+networks:
+  dbt_workbench:
+    driver: bridge
+volumes:
+  postgres_data: null

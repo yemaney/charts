@@ -1,0 +1,719 @@
+import { graphlib, layout as dagreLayout } from '@dagrejs/dagre'
+import { select } from 'd3-selection'
+import { line, curveCatmullRom } from 'd3-shape'
+import { zoom, zoomIdentity, type ZoomBehavior, type ZoomTransform } from 'd3-zoom'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
+
+import { api } from '../api/client'
+import {
+  ColumnLineageGraph,
+  ColumnNode,
+  ImpactResponse,
+  LineageEdge,
+  LineageGraph,
+  LineageGroup,
+  LineageNode,
+  ModelDetail,
+} from '../types'
+
+type GroupingMode = 'none' | 'schema' | 'resource_type' | 'tag'
+type ViewMode = 'model' | 'column'
+
+type GraphNode<T extends LineageNode | ColumnNode> = T & { isGroup?: boolean; isSubtree?: boolean }
+type PositionedNode<T extends LineageNode | ColumnNode> = GraphNode<T> & { x: number; y: number }
+type PositionedEdge = LineageEdge & { points: { x: number; y: number }[] }
+
+type VisibleGraph<T extends LineageNode | ColumnNode> = {
+  nodes: GraphNode<T>[]
+  edges: LineageEdge[]
+}
+
+type LayoutResult<T extends LineageNode | ColumnNode> = {
+  nodes: PositionedNode<T>[]
+  edges: PositionedEdge[]
+  size: { width: number; height: number }
+}
+
+type LineageConfig = {
+  default_grouping_mode?: GroupingMode
+  max_initial_depth?: number
+  load_column_lineage_by_default?: boolean
+  performance_mode?: string
+}
+
+const nodeSize = { width: 190, height: 84 }
+const canvas = { width: 1200, height: 720 }
+const emptyImpact: ImpactResponse = { upstream: [], downstream: [] }
+const normalizeImpact = (value?: Partial<ImpactResponse>): ImpactResponse => ({
+  upstream: value?.upstream ?? [],
+  downstream: value?.downstream ?? [],
+})
+
+const groupColor: Record<string, { fill: string; stroke: string }> = {
+  model: { fill: '#1f2937', stroke: '#3b82f6' },
+  seed: { fill: '#1f2937', stroke: '#22c55e' },
+  snapshot: { fill: '#1f2937', stroke: '#a855f7' },
+  source: { fill: '#1f2937', stroke: '#fb923c' },
+  test: { fill: '#1f2937', stroke: '#f59e0b' },
+  group: { fill: '#111827', stroke: '#9ca3af' },
+  subtree: { fill: '#0f172a', stroke: '#e5e7eb' },
+}
+
+const getNodeColor = (node: LineageNode | ColumnNode): { fill: string; stroke: string } => {
+  if ((node as GraphNode<LineageNode>).isGroup) return groupColor.group
+  if ((node as GraphNode<LineageNode>).isSubtree) return groupColor.subtree
+  return groupColor[node.type] || { fill: '#111827', stroke: '#9ca3af' }
+}
+
+const normalizeColumnId = (columnId: string) => columnId.replace(/\s+/g, '')
+
+const curvedLine = line<{ x: number; y: number }>()
+  .x((d) => d.x)
+  .y((d) => d.y)
+  .curve(curveCatmullRom.alpha(0.6))
+
+const buildLayout = <T extends LineageNode | ColumnNode>(visibleGraph: VisibleGraph<T>): LayoutResult<T> => {
+  if (visibleGraph.nodes.length === 0) return { nodes: [], edges: [], size: canvas }
+
+  const dag = new graphlib.Graph({ multigraph: true, compound: false })
+  dag.setDefaultEdgeLabel(() => ({}))
+  dag.setGraph({ rankdir: 'LR', ranksep: 140, nodesep: 80, marginx: 48, marginy: 48 })
+
+  visibleGraph.nodes.forEach((node) => {
+    dag.setNode(node.id, { width: nodeSize.width, height: nodeSize.height })
+  })
+
+  visibleGraph.edges.forEach((edge) => {
+    dag.setEdge(edge.source, edge.target, {})
+  })
+
+  dagreLayout(dag)
+
+  const graphLabel = dag.graph()
+  const width = Math.max(graphLabel?.width || canvas.width, canvas.width)
+  const height = Math.max(graphLabel?.height || canvas.height, canvas.height)
+
+  const positionedNodes: PositionedNode<T>[] = visibleGraph.nodes.map((node) => {
+    const dagNode = dag.node(node.id)
+    return {
+      ...node,
+      x: dagNode?.x ?? nodeSize.width,
+      y: dagNode?.y ?? nodeSize.height,
+    }
+  })
+
+  const positionedEdges: PositionedEdge[] = visibleGraph.edges.map((edge) => {
+    const dagEdge = dag.edge(edge.source, edge.target)
+    return {
+      ...edge,
+      points: dagEdge?.points || [],
+    }
+  })
+
+  return { nodes: positionedNodes, edges: positionedEdges, size: { width, height } }
+}
+
+const buildPathFromPoints = (points: { x: number; y: number }[]): string => {
+  return curvedLine(points) || ''
+}
+
+const buildGroupedGraph = <T extends LineageNode | ColumnNode>(
+  graphNodes: T[],
+  graphEdges: LineageEdge[],
+  grouping: GroupingMode,
+  groups: LineageGroup[],
+  collapsedGroups: Set<string>,
+  collapsedSubtrees: Record<string, Set<string>>,
+): VisibleGraph<T> => {
+  let nodes: (T & { isGroup?: boolean; isSubtree?: boolean })[] = [...graphNodes]
+  let edges: LineageEdge[] = [...graphEdges]
+
+  const filteredGroups = groups.filter((g) => grouping === 'none' ? false : g.type === grouping)
+
+  filteredGroups.forEach((group) => {
+    const groupId = `group:${group.id}`
+    const memberSet = new Set(group.members)
+    if (!collapsedGroups.has(groupId)) return
+    nodes = nodes.filter((node) => !memberSet.has(node.id))
+    const aggregated: any = {
+      id: groupId,
+      label: `${group.label} (${group.members.length})`,
+      type: 'group',
+      database: undefined,
+      schema: undefined,
+      tags: [],
+      isGroup: true,
+    }
+
+    const nextEdges: LineageEdge[] = []
+    edges.forEach((edge) => {
+      const sourceIn = memberSet.has(edge.source)
+      const targetIn = memberSet.has(edge.target)
+      if (sourceIn && targetIn) return
+      if (sourceIn && !targetIn) {
+        nextEdges.push({ source: groupId, target: edge.target })
+        return
+      }
+      if (!sourceIn && targetIn) {
+        nextEdges.push({ source: edge.source, target: groupId })
+        return
+      }
+      nextEdges.push(edge)
+    })
+    nodes.push(aggregated)
+    edges = nextEdges
+  })
+
+  Object.entries(collapsedSubtrees).forEach(([rootId, members]) => {
+    const memberSet = new Set(members)
+    if (memberSet.size === 0) return
+    nodes = nodes.filter((node) => !memberSet.has(node.id))
+    const subtreeId = `subtree:${rootId}`
+    const nextEdges: LineageEdge[] = []
+    edges.forEach((edge) => {
+      const sourceIn = memberSet.has(edge.source)
+      const targetIn = memberSet.has(edge.target)
+      if (sourceIn && targetIn) return
+      if (edge.source === rootId && targetIn) {
+        nextEdges.push({ source: rootId, target: subtreeId })
+        return
+      }
+      if (sourceIn && edge.target === rootId) {
+        nextEdges.push({ source: subtreeId, target: rootId })
+        return
+      }
+      if (sourceIn && !targetIn) {
+        nextEdges.push({ source: subtreeId, target: edge.target })
+        return
+      }
+      if (!sourceIn && targetIn) {
+        nextEdges.push({ source: edge.source, target: subtreeId })
+        return
+      }
+      nextEdges.push(edge)
+    })
+    nodes.push({
+      ...(nodes.find((n) => n.id === rootId) as T),
+      id: subtreeId,
+      label: `Collapsed from ${rootId}`,
+      isSubtree: true,
+      type: 'group',
+    })
+    edges = nextEdges
+  })
+
+  return { nodes, edges }
+}
+
+function LineagePage() {
+  const navigate = useNavigate()
+  const [graph, setGraph] = useState<LineageGraph>({ nodes: [], edges: [], groups: [] })
+  const [columnGraph, setColumnGraph] = useState<ColumnLineageGraph>({ nodes: [], edges: [] })
+  const [groupMode, setGroupMode] = useState<GroupingMode>('none')
+  const [viewMode, setViewMode] = useState<ViewMode>('model')
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set())
+  const [collapsedSubtrees, setCollapsedSubtrees] = useState<Record<string, Set<string>>>({})
+  const [selectedNode, setSelectedNode] = useState<string | null>(null)
+  const [selectedColumn, setSelectedColumn] = useState<string | null>(null)
+  const [impact, setImpact] = useState<ImpactResponse>(emptyImpact)
+  const [modelDetail, setModelDetail] = useState<ModelDetail | null>(null)
+  const [config, setConfig] = useState<LineageConfig>({})
+  const [maxDepth, setMaxDepth] = useState<number | undefined>(undefined)
+
+  useEffect(() => {
+    api
+      .get<{ lineage?: LineageConfig }>('/config')
+      .then((res) => {
+        const lineage = res.data?.lineage || {}
+        setConfig(lineage)
+        if (lineage.default_grouping_mode) setGroupMode(lineage.default_grouping_mode)
+        if (lineage.max_initial_depth) setMaxDepth(lineage.max_initial_depth)
+        if (lineage.load_column_lineage_by_default) {
+          fetchColumnGraph()
+        }
+      })
+      .catch(() => undefined)
+  }, [])
+
+  const fetchGraph = (depth?: number) => {
+    const query = depth ? `?max_depth=${depth}` : ''
+    api
+      .get<LineageGraph>(`/lineage/graph${query}`)
+      .then((res) => setGraph({ groups: res.data.groups || [], nodes: res.data.nodes, edges: res.data.edges }))
+      .catch(() => setGraph({ nodes: [], edges: [], groups: [] }))
+  }
+
+  const fetchColumnGraph = () => {
+    api
+      .get<ColumnLineageGraph>('/lineage/columns')
+      .then((res) => setColumnGraph(res.data))
+      .catch(() => setColumnGraph({ nodes: [], edges: [] }))
+  }
+
+  useEffect(() => {
+    fetchGraph(config.max_initial_depth)
+  }, [config.max_initial_depth])
+
+  const highlightNodes = useMemo(() => {
+    const activeImpact = impact || emptyImpact
+    const set = new Set<string>()
+    if (viewMode === 'model' && selectedNode) {
+      set.add(selectedNode)
+      activeImpact.upstream.forEach((n) => set.add(n))
+      activeImpact.downstream.forEach((n) => set.add(n))
+    }
+    if (viewMode === 'column' && selectedColumn) {
+      set.add(selectedColumn)
+      activeImpact.upstream.forEach((n) => set.add(n))
+      activeImpact.downstream.forEach((n) => set.add(n))
+    }
+    return set
+  }, [impact, selectedColumn, selectedNode, viewMode])
+
+  const activeGraph = viewMode === 'model' ? graph : columnGraph
+  const groups = graph.groups || []
+
+  const visibleGraph = useMemo(() => {
+    return buildGroupedGraph(
+      activeGraph.nodes as any,
+      activeGraph.edges as any,
+      groupMode,
+      groups,
+      collapsedGroups,
+      collapsedSubtrees,
+    )
+  }, [activeGraph.edges, activeGraph.nodes, collapsedGroups, collapsedSubtrees, groupMode, groups])
+
+  const hasData = visibleGraph.nodes.length > 0
+
+  const layout = useMemo(() => buildLayout(visibleGraph), [visibleGraph])
+
+  const svgRef = useRef<SVGSVGElement | null>(null)
+  const graphContainerRef = useRef<HTMLDivElement | null>(null)
+  const zoomBehaviorRef = useRef<ZoomBehavior<SVGSVGElement, unknown> | null>(null)
+  const [transform, setTransform] = useState<ZoomTransform>(zoomIdentity)
+  const [isFullscreen, setIsFullscreen] = useState(false)
+
+  useEffect(() => {
+    if (!svgRef.current || !hasData) return
+    const svg = select(svgRef.current)
+    const zoomBehavior = zoom<SVGSVGElement, unknown>()
+      .scaleExtent([0.3, 3])
+      .on('zoom', (event) => setTransform(event.transform))
+
+    zoomBehaviorRef.current = zoomBehavior
+    svg.call(zoomBehavior as any).on('dblclick.zoom', null)
+    return () => {
+      svg.on('.zoom', null)
+    }
+  }, [hasData])
+
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      setIsFullscreen(document.fullscreenElement === graphContainerRef.current)
+    }
+    document.addEventListener('fullscreenchange', handleFullscreenChange)
+    return () => document.removeEventListener('fullscreenchange', handleFullscreenChange)
+  }, [])
+
+  const adjustZoom = (scaleFactor: number) => {
+    if (!svgRef.current || !zoomBehaviorRef.current) return
+    select(svgRef.current).call(zoomBehaviorRef.current.scaleBy as any, scaleFactor)
+  }
+
+  const resetZoom = () => {
+    if (!svgRef.current || !zoomBehaviorRef.current) return
+    select(svgRef.current).call(zoomBehaviorRef.current.transform as any, zoomIdentity)
+  }
+
+  const toggleFullscreen = () => {
+    const target = graphContainerRef.current
+    if (!target) return
+    if (document.fullscreenElement === target) {
+      document.exitFullscreen?.().catch(() => undefined)
+      return
+    }
+    target.requestFullscreen?.().catch(() => undefined)
+  }
+
+  const toggleGroup = (groupId: string) => {
+    setCollapsedGroups((prev) => {
+      const next = new Set(prev)
+      if (next.has(groupId)) next.delete(groupId)
+      else next.add(groupId)
+      return next
+    })
+  }
+
+  const collapseSubtree = (rootId: string) => {
+    setCollapsedSubtrees((prev) => {
+      const next = { ...prev }
+      if (next[rootId]) {
+        delete next[rootId]
+        return next
+      }
+      const members = new Set<string>()
+      visibleGraph.edges.forEach((edge) => {
+        if (edge.source === rootId) members.add(edge.target)
+      })
+      if (members.size > 0) next[rootId] = members
+      return next
+    })
+  }
+
+  const selectModelNode = (nodeId: string) => {
+    setViewMode('model')
+    setSelectedColumn(null)
+    setSelectedNode(nodeId)
+    api
+      .get<ImpactResponse>(`/lineage/upstream/${encodeURIComponent(nodeId)}`)
+      .then((res) => setImpact(normalizeImpact(res.data)))
+      .catch(() => setImpact(emptyImpact))
+    api.get<ModelDetail>(`/lineage/model/${encodeURIComponent(nodeId)}`).then((res) => setModelDetail(res.data))
+  }
+
+  const selectColumnNode = (columnId: string) => {
+    const normalized = normalizeColumnId(columnId)
+    const separatorIndex = normalized.indexOf('.')
+    const modelId = separatorIndex >= 0 ? normalized.slice(0, separatorIndex) : normalized
+    const column = separatorIndex >= 0 ? normalized.slice(separatorIndex + 1) : ''
+    setViewMode('column')
+    setSelectedNode(null)
+    setSelectedColumn(normalized)
+    api
+      .get<ImpactResponse>(`/lineage/upstream/${encodeURIComponent(modelId)}?column=${encodeURIComponent(column)}`)
+      .then((res) => setImpact(normalizeImpact(res.data)))
+      .catch(() => setImpact(emptyImpact))
+  }
+
+  const handleNodeClick = (node: PositionedNode<LineageNode> | PositionedNode<ColumnNode>) => {
+    if (node.isGroup || node.isSubtree) {
+      return
+    }
+    if (viewMode === 'model') {
+      selectModelNode(node.id)
+    } else {
+      selectColumnNode(node.id)
+    }
+  }
+
+  const visibleGroups = useMemo(
+    () => groups.filter((g) => (groupMode === 'none' ? true : g.type === groupMode)),
+    [groupMode, groups],
+  )
+
+  const deselectColumnView = () => {
+    setViewMode('model')
+    setSelectedColumn(null)
+    setImpact(emptyImpact)
+  }
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-semibold">Lineage</h1>
+          <p className="text-sm text-gray-400">Navigate model and column lineage with grouping, collapse, and impact analysis.</p>
+        </div>
+        <div className="flex gap-3">
+          <select
+            value={groupMode}
+            onChange={(e) => setGroupMode(e.target.value as GroupingMode)}
+            className="bg-panel border border-gray-700 rounded px-3 py-2 text-sm"
+          >
+            <option value="none">No grouping</option>
+            <option value="schema">Schema</option>
+            <option value="resource_type">Resource type</option>
+            <option value="tag">Tags</option>
+          </select>
+          <input
+            type="number"
+            min={1}
+            value={maxDepth ?? ''}
+            onChange={(e) => {
+              const value = e.target.value ? Number(e.target.value) : undefined
+              setMaxDepth(value)
+              fetchGraph(value)
+            }}
+            placeholder="Max depth"
+            className="bg-panel border border-gray-700 rounded px-3 py-2 text-sm w-28"
+          />
+          <button
+            onClick={() => {
+              fetchGraph(maxDepth)
+              if (config.load_column_lineage_by_default) fetchColumnGraph()
+            }}
+            className="bg-accent text-white px-4 py-2 rounded text-sm"
+          >
+            Refresh
+          </button>
+          {viewMode === 'column' && (
+            <button onClick={deselectColumnView} className="bg-gray-700 text-white px-4 py-2 rounded text-sm border border-gray-500">
+              Return to models
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-12 gap-4">
+        <div className="col-span-9 bg-panel border border-gray-800 rounded-lg p-4">
+          {!hasData ? (
+            <div className="text-gray-400">No lineage data available.</div>
+          ) : (
+            <div
+              ref={graphContainerRef}
+              className={`relative rounded-lg overflow-hidden border border-gray-800/60 bg-gradient-to-br from-gray-950 via-slate-950 to-gray-900 ${
+                isFullscreen ? 'h-full w-full' : 'h-[720px]'
+              }`}
+            >
+              <div className="absolute right-3 top-3 z-10 flex items-center gap-2 rounded-md border border-gray-700 bg-gray-900/80 px-2 py-1 text-[11px] text-gray-200 backdrop-blur">
+                <button
+                  onClick={() => adjustZoom(1.2)}
+                  className="rounded border border-gray-600 px-2 py-1 hover:bg-gray-800"
+                  aria-label="Zoom in"
+                >
+                  +
+                </button>
+                <button
+                  onClick={() => adjustZoom(1 / 1.2)}
+                  className="rounded border border-gray-600 px-2 py-1 hover:bg-gray-800"
+                  aria-label="Zoom out"
+                >
+                  -
+                </button>
+                <button
+                  onClick={resetZoom}
+                  className="rounded border border-gray-600 px-2 py-1 hover:bg-gray-800"
+                >
+                  Reset
+                </button>
+                <button
+                  onClick={toggleFullscreen}
+                  className="rounded border border-gray-600 px-2 py-1 hover:bg-gray-800"
+                >
+                  {isFullscreen ? 'Exit full screen' : 'Full screen'}
+                </button>
+              </div>
+              <svg
+                ref={svgRef}
+                width="100%"
+                height={isFullscreen ? '100%' : canvas.height}
+                viewBox={`0 0 ${layout.size.width} ${layout.size.height}`}
+                className="w-full h-full text-gray-200 cursor-grab active:cursor-grabbing"
+                style={{ touchAction: 'none' }}
+              >
+                <defs>
+                  <marker
+                    id="lineage-arrow"
+                    markerWidth="12"
+                    markerHeight="10"
+                    refX="12"
+                    refY="5"
+                    orient="auto"
+                    markerUnits="strokeWidth"
+                  >
+                    <polygon points="0 0, 12 5, 0 10" fill="#38bdf8" />
+                  </marker>
+                  <filter id="node-shadow" x="-20%" y="-20%" width="140%" height="140%">
+                    <feDropShadow dx="0" dy="2" stdDeviation="3" floodColor="#0ea5e9" floodOpacity="0.12" />
+                  </filter>
+                  <pattern id="lineage-grid" x="0" y="0" width="32" height="32" patternUnits="userSpaceOnUse">
+                    <path d="M 32 0 L 0 0 0 32" fill="none" stroke="#1f2937" strokeWidth="0.5" />
+                  </pattern>
+                </defs>
+                <rect
+                  width={layout.size.width}
+                  height={layout.size.height}
+                  fill="url(#lineage-grid)"
+                  rx={16}
+                  ry={16}
+                  className="text-gray-800"
+                />
+                <g transform={transform.toString()}>
+                  {layout.edges.map((edge) => {
+                    const sourceHighlighted = highlightNodes.has(edge.source) && highlightNodes.has(edge.target)
+                    const opacity = sourceHighlighted || highlightNodes.size === 0 ? 0.92 : 0.25
+                    return (
+                      <path
+                        key={`${edge.source}-${edge.target}`}
+                        d={buildPathFromPoints(edge.points)}
+                        fill="none"
+                        stroke={sourceHighlighted ? '#38bdf8' : '#475569'}
+                        strokeWidth={sourceHighlighted ? 3 : 1.5}
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        markerEnd="url(#lineage-arrow)"
+                        opacity={opacity}
+                      />
+                    )
+                  })}
+
+                  {layout.nodes.map((node) => {
+                    const { fill, stroke } = getNodeColor(node)
+                    const emphasized = highlightNodes.size === 0 || highlightNodes.has(node.id)
+                    const faded = emphasized ? 1 : 0.35
+                    const isCollapsed = (node as PositionedNode<LineageNode>).isGroup || (node as PositionedNode<LineageNode>).isSubtree
+                    return (
+                      <g
+                        key={node.id}
+                        transform={`translate(${node.x - nodeSize.width / 2}, ${node.y - nodeSize.height / 2})`}
+                        onClick={() => handleNodeClick(node)}
+                        data-node-id={node.id}
+                        data-testid={`lineage-node-${node.id}`}
+                        role="button"
+                        className="cursor-pointer transition duration-150"
+                        opacity={faded}
+                      >
+                        <rect
+                          width={nodeSize.width}
+                          height={nodeSize.height}
+                          rx={12}
+                          ry={12}
+                          fill={fill}
+                          stroke={stroke}
+                          strokeWidth={isCollapsed ? 1 : 1.75}
+                          strokeDasharray={isCollapsed ? '6 4' : '0'}
+                          filter="url(#node-shadow)"
+                        />
+                        <text x={16} y={26} className="text-sm font-semibold" fill="#e5e7eb">
+                          {node.label}
+                        </text>
+                        {node.schema && (
+                          <text x={16} y={46} className="text-[11px]" fill="#cbd5e1">
+                            {node.schema}
+                          </text>
+                        )}
+                        {node.type && (
+                          <text x={16} y={62} className="text-[10px] uppercase" fill="#94a3b8">
+                            {node.type}
+                          </text>
+                        )}
+                        <title>{node.label}</title>
+                      </g>
+                    )
+                  })}
+                </g>
+              </svg>
+            </div>
+          )}
+        </div>
+
+        <div className="col-span-3 space-y-4">
+          <div className="bg-panel border border-gray-800 rounded-lg p-3 space-y-3">
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-semibold text-white">Grouping</h3>
+              <span className="text-[11px] text-gray-400">Mode: {groupMode}</span>
+            </div>
+            <div className="space-y-2 max-h-48 overflow-auto pr-1">
+              {visibleGroups.map((group) => {
+                const groupId = `group:${group.id}`
+                const collapsed = collapsedGroups.has(groupId)
+                return (
+                  <div key={group.id} className="flex items-center justify-between text-sm text-gray-200">
+                    <div>
+                      <div className="font-medium">{group.label}</div>
+                      <div className="text-[11px] text-gray-400">{group.members.length} nodes</div>
+                    </div>
+                    <button
+                      onClick={() => toggleGroup(groupId)}
+                      className="text-xs px-2 py-1 border border-gray-600 rounded"
+                    >
+                      {collapsed ? 'Expand' : 'Collapse'}
+                    </button>
+                  </div>
+                )
+              })}
+              {visibleGroups.length === 0 && <div className="text-xs text-gray-400">No groups available for this mode.</div>}
+            </div>
+          </div>
+
+          <div className="bg-panel border border-gray-800 rounded-lg p-3 space-y-2">
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-semibold text-white">Selection</h3>
+              {selectedNode && (
+                <button
+                  onClick={() => navigate(`/models/${selectedNode}`)}
+                  className="text-xs text-accent underline"
+                >
+                  Open model
+                </button>
+              )}
+            </div>
+            {selectedNode && modelDetail && (
+              <div className="space-y-2">
+                <div className="text-gray-200 text-sm font-medium">{modelDetail.model_id}</div>
+                <div className="text-[11px] text-gray-400">Parents: {modelDetail.parents.length} | Children: {modelDetail.children.length}</div>
+                <div className="flex flex-wrap gap-1">
+                  {(modelDetail.tags || []).map((tag) => (
+                    <span key={tag} className="text-[10px] bg-gray-700 px-2 py-1 rounded-full text-gray-200">{tag}</span>
+                  ))}
+                </div>
+                <div className="space-y-1">
+                  <div className="text-xs text-gray-300 font-semibold">Columns</div>
+                  <div className="max-h-32 overflow-auto space-y-1">
+                    {Object.entries(modelDetail.columns || {}).map(([col, meta]) => {
+                      const columnId = `${modelDetail.model_id}.${col}`
+                      return (
+                        <button
+                          key={col}
+                          onClick={() => selectColumnNode(columnId)}
+                          className="w-full text-left text-[11px] px-2 py-1 bg-gray-800 rounded hover:bg-gray-700"
+                        >
+                          <div className="text-gray-100">{col}</div>
+                          {meta.description && <div className="text-gray-400 truncate">{meta.description}</div>}
+                        </button>
+                      )
+                    })}
+                    {Object.keys(modelDetail.columns || {}).length === 0 && <div className="text-[11px] text-gray-500">No columns.</div>}
+                  </div>
+                </div>
+                <button
+                  onClick={() => collapseSubtree(selectedNode)}
+                  className="text-xs px-3 py-1 bg-gray-700 border border-gray-600 rounded"
+                >
+                  Toggle collapse subtree
+                </button>
+              </div>
+            )}
+            {selectedColumn && (
+              <div className="space-y-1 text-sm text-gray-200">
+                <div className="font-semibold">{selectedColumn}</div>
+                <div className="text-[11px] text-gray-400">Upstream: {impact.upstream.length} | Downstream: {impact.downstream.length}</div>
+              </div>
+            )}
+            {!selectedNode && !selectedColumn && <div className="text-xs text-gray-400">Select a node to view details.</div>}
+          </div>
+
+          <div className="bg-panel border border-gray-800 rounded-lg p-3 space-y-2">
+            <h3 className="text-sm font-semibold text-white">Impact</h3>
+            {impact.upstream.length + impact.downstream.length === 0 ? (
+              <div className="text-xs text-gray-400">No impact highlighted.</div>
+            ) : (
+              <div className="text-xs text-gray-200 space-y-2">
+                <div>
+                  <div className="font-semibold text-gray-300">Upstream</div>
+                  <div className="flex flex-wrap gap-1">
+                    {impact.upstream.map((item) => (
+                      <span key={item} className="bg-gray-700 px-2 py-1 rounded text-[11px]">{item}</span>
+                    ))}
+                  </div>
+                </div>
+                <div>
+                  <div className="font-semibold text-gray-300">Downstream</div>
+                  <div className="flex flex-wrap gap-1">
+                    {impact.downstream.map((item) => (
+                      <span key={item} className="bg-gray-700 px-2 py-1 rounded text-[11px]">{item}</span>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+export default LineagePage
