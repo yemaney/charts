@@ -1,0 +1,38 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-profiles
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+data:
+  profiles.yml: |
+    {{ .Values.dbtProject.name }}:
+      target: {{ .Values.dbtProject.defaultTarget }}
+      outputs:
+        dev:
+          type: duckdb
+          path: '/app/data/{{ .Values.dbtProject.name }}.duckdb'
+          threads: 1
+        {{- if .Values.trino.enabled }}
+        {{ .Values.trino.connectionName }}:
+          type: trino
+          {{- if eq .Values.trino.authMethod "noauth" }}
+          method: none
+          user: {{ .Values.trino.user | default "dbt" | quote }}
+          {{- else if eq .Values.trino.authMethod "ldap" }}
+          method: ldap
+          user: {{ .Values.trino.ldap.user | quote }}
+          password: {{ .Values.trino.ldap.password | quote }}
+          {{- else if eq .Values.trino.authMethod "jwt" }}
+          method: jwt
+          user: {{ .Values.trino.user | default "dbt" | quote }}
+          jwt_token: {{ .Values.trino.jwt.token | quote }}
+          {{- end }}
+          host: {{ .Values.trino.host }}
+          port: {{ .Values.trino.port }}
+          catalog: {{ .Values.trino.catalog }}
+          schema: {{ .Values.trino.schema }}
+          threads: 4
+        {{- end }}
+

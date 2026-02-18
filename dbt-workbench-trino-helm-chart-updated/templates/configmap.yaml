@@ -1,0 +1,28 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-backend-config
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+data:
+  # PostgreSQL connection (auto-configured from postgresql.* values)
+  {{- if eq .Values.postgresql.type "external" }}
+  POSTGRES_HOST: {{ .Values.postgresql.external.host | quote }}
+  POSTGRES_PORT: {{ .Values.postgresql.external.port | default .Values.postgresql.port | quote }}
+  POSTGRES_USER: {{ .Values.postgresql.external.user | default .Values.postgresql.user | quote }}
+  POSTGRES_DB: {{ .Values.postgresql.external.database | default .Values.postgresql.database | quote }}
+  {{- else }}
+  POSTGRES_HOST: {{ .Release.Name }}-postgresql
+  POSTGRES_PORT: {{ .Values.postgresql.port | quote }}
+  POSTGRES_USER: {{ .Values.postgresql.user | quote }}
+  POSTGRES_DB: {{ .Values.postgresql.database | quote }}
+  {{- end }}
+  # User-configurable settings
+  AUTH_ENABLED: {{ .Values.backend.env.AUTH_ENABLED | quote }}
+  SCHEDULER_ENABLED: {{ .Values.backend.env.SCHEDULER_ENABLED | quote }}
+  # Internal paths (fixed, not user-configurable)
+  DBT_ARTIFACTS_PATH: "/app/data/artifacts"
+  DBT_PROJECT_PATH: "/app/data/repos/default"
+  DBT_PROFILES_PATH: "/app/data/profiles"
+  GIT_REPOS_BASE_PATH: "/app/data/repos"

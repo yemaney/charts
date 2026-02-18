@@ -1,0 +1,173 @@
+# dbt-Workbench Helm Chart Values (Trino Integration)
+
+# Backend configuration
+backend:
+  image:
+    repository: fenil2265/dbt-workbench-backend
+    tag: 1.0.1
+    pullPolicy: IfNotPresent
+  replicas: 1
+  port: 8000
+  env:
+    AUTH_ENABLED: "false"
+    SCHEDULER_ENABLED: "true"
+  # dbt Adapters to auto-install on startup
+  # These will be installed via pip before the backend starts
+  #dbtAdapters:
+  #- dbt-trino
+
+  # Frontend configuration
+frontend:
+  image:
+    repository: fenil2265/dbt-workbench-frontend
+    tag: 1.0.2
+    pullPolicy: IfNotPresent
+  replicas: 1
+  port: 3000
+  # IMPORTANT: Set this to the externally accessible backend URL
+  # For port-forward: use http://<EC2_PUBLIC_IP>:8000
+  # For Ingress: use the ingress hostname
+  env:
+    VITE_API_BASE_URL: "http://192.168.33.12:8000"
+
+# PostgreSQL configuration
+postgresql:
+  # "bundled" = deploy a PostgreSQL StatefulSet inside the cluster (default)
+  # "external" = connect to an existing external PostgreSQL instance
+  type: "bundled"
+
+  # --- Bundled-mode settings (only used when type=bundled) ---
+  image:
+    repository: postgres
+    tag: "13"
+    pullPolicy: IfNotPresent
+
+  # --- Shared settings (used by both bundled and external) ---
+  port: 5432
+  database: dbt_workbench
+  user: user
+
+  # --- External-mode settings (only used when type=external) ---
+  external:
+    # Host of your existing PostgreSQL instance
+    # Examples: "my-rds.abc123.us-east-1.rds.amazonaws.com", "10.0.1.50"
+    host: ""
+    # Port (defaults to postgresql.port if not set)
+    port: ""
+    # Database name (defaults to postgresql.database if not set)
+    database: ""
+    # Username (defaults to postgresql.user if not set)
+    user: ""
+    # Optional: set sslMode for secure connections (e.g. "require", "verify-full")
+    # sslMode: ""
+
+# Secrets configuration
+secrets:
+  # Set to true to let the chart create the Kubernetes Secret (default)
+  # Set to false to use an existing Secret (for production / Git-safe usage)
+  create: true
+
+  # When create=true: these values will be stored in the chart-created Secret
+  # When create=false: these are ignored
+  postgresPassword: "dbt-workbench-password"
+  jwtSecretKey: "super-secret-jwt-key-change-me-in-production-1234567890"
+
+  # When create=false: provide the name of your existing Kubernetes Secret
+  # The secret MUST contain these keys: POSTGRES_PASSWORD, JWT_SECRET_KEY
+  # Example: kubectl create secret generic my-dbt-secrets \
+  #   --from-literal=POSTGRES_PASSWORD="real-password" \
+  #   --from-literal=JWT_SECRET_KEY="real-jwt-key"
+  existingSecretName: ""
+
+# Persistence configuration (single PVC approach)
+persistence:
+  enabled: true
+  storageClass: "standard"
+  size: 10Gi
+
+# PostgreSQL persistence (only used when postgresql.type=bundled)
+postgresqlPersistence:
+  enabled: true
+  storageClass: "standard"
+  size: 5Gi
+
+# =============================================================================
+# TRINO INTEGRATION CONFIGURATION
+# =============================================================================
+trino:
+  # Enable/disable Trino connection in profiles.yml
+  enabled: true
+
+  # Connection name used in profiles.yml (this becomes the target name)
+  connectionName: "trino_dev"
+
+  # Trino service endpoint (within cluster)
+  # For Kind cluster: trino.trino.svc.cluster.local
+  # For production: your-trino-host.example.com
+  host: "trino.trino.svc.cluster.local"
+  port: 8080
+
+  # Trino catalog and schema
+  # Available catalogs: memory (writable), tpch/tpcds (read-only benchmarks)
+  catalog: "memory"
+  schema: "default"
+
+  # User for Trino connection (required even for noauth)
+  user: "dbt"
+
+  # Authentication method: noauth | ldap | jwt
+  authMethod: "noauth"
+
+  # LDAP authentication (used when authMethod: ldap)
+  ldap:
+    user: ""
+    password: ""
+
+  # JWT authentication (used when authMethod: jwt)
+  jwt:
+    token: ""
+
+# =============================================================================
+# DBT PROJECT CONFIGURATION
+# =============================================================================
+dbtProject:
+  # Project name (used in profiles.yml)
+  name: "test_project"
+
+  # Default target - set to Trino connection to use Trino by default
+  # Options: "dev" (DuckDB) or the value of trino.connectionName
+  defaultTarget: "trino_dev"
+
+# =============================================================================
+# INGRESS CONFIGURATION
+# =============================================================================
+ingress:
+  # Enable/disable Ingress resource
+  enabled: false
+
+  # Ingress class name (e.g., nginx, traefik, alb)
+  className: "nginx"
+
+  # Hostname for the Ingress
+  # Example: dbt.example.com
+  host: "dbt.example.com"
+
+  # Annotations for the Ingress
+  # These vary by ingress controller
+  annotations:
+    # nginx ingress annotations
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+    # For AWS ALB ingress controller, use:
+    # kubernetes.io/ingress.class: alb
+    # alb.ingress.kubernetes.io/scheme: internet-facing
+    # alb.ingress.kubernetes.io/target-type: ip
+
+    # TLS configuration (optional)
+    # Uncomment to enable HTTPS
+  tls: []
+  #  - secretName: dbt-workbench-tls
+  #    hosts:
+  #      - dbt.example.com
+
