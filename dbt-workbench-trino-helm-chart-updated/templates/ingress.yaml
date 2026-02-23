@@ -1,15 +1,25 @@
 {{- if .Values.ingress.enabled -}}
+# =============================================================================
+# Ingress 1: Backend API
+# Routes /api/* requests to the backend, stripping the /api prefix
+# This means: http://host/api/models → backend receives /models
+# =============================================================================
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: {{ .Release.Name }}-ingress
+  name: {{ .Release.Name }}-api-ingress
   labels:
     app.kubernetes.io/name: {{ .Chart.Name }}
     app.kubernetes.io/instance: {{ .Release.Name }}
-  {{- with .Values.ingress.annotations }}
+    app.kubernetes.io/component: api
   annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+    {{- with .Values.ingress.annotations }}
     {{- toYaml . | nindent 4 }}
-  {{- end }}
+    {{- end }}
 spec:
   {{- if .Values.ingress.className }}
   ingressClassName: {{ .Values.ingress.className }}
@@ -28,10 +38,38 @@ spec:
     - host: {{ .Values.ingress.host | quote }}
       http:
         paths:
-          # ===========================================
-          # Backend API routes (more specific first)
-          # ===========================================
-          # Health and docs
+          - path: /api(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: {{ .Release.Name }}-backend
+                port:
+                  number: {{ .Values.backend.port }}
+---
+# =============================================================================
+# Ingress 2: Health & Docs (direct access, no /api prefix needed)
+# These are utility endpoints accessed directly by monitoring tools / devs
+# =============================================================================
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ .Release.Name }}-health-ingress
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: health
+  annotations:
+    {{- with .Values.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  {{- if .Values.ingress.className }}
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
           - path: /health
             pathType: Prefix
             backend:
@@ -53,145 +91,41 @@ spec:
                 name: {{ .Release.Name }}-backend
                 port:
                   number: {{ .Values.backend.port }}
-          - path: /redoc
-            pathType: Prefix
-            backend:
-              service:
-                name: {{ .Release.Name }}-backend
-                port:
-                  number: {{ .Values.backend.port }}
-
-          # Core API endpoints
-          - path: /workspaces
-            pathType: Prefix
-            backend:
-              service:
-                name: {{ .Release.Name }}-backend
-                port:
-                  number: {{ .Values.backend.port }}
-          - path: /models
-            pathType: Prefix
-            backend:
-              service:
-                name: {{ .Release.Name }}-backend
-                port:
-                  number: {{ .Values.backend.port }}
-          - path: /sources
-            pathType: Prefix
-            backend:
-              service:
-                name: {{ .Release.Name }}-backend
-                port:
-                  number: {{ .Values.backend.port }}
-          - path: /tests
-            pathType: Prefix
-            backend:
-              service:
-                name: {{ .Release.Name }}-backend
-                port:
-                  number: {{ .Values.backend.port }}
-          - path: /runs
-            pathType: Prefix
-            backend:
-              service:
-                name: {{ .Release.Name }}-backend
-                port:
-                  number: {{ .Values.backend.port }}
-          - path: /execution
-            pathType: Prefix
-            backend:
-              service:
-                name: {{ .Release.Name }}-backend
-                port:
-                  number: {{ .Values.backend.port }}
-          - path: /dbt
-            pathType: Prefix
-            backend:
-              service:
-                name: {{ .Release.Name }}-backend
-                port:
-                  number: {{ .Values.backend.port }}
-          - path: /config
-            pathType: Prefix
-            backend:
-              service:
-                name: {{ .Release.Name }}-backend
-                port:
-                  number: {{ .Values.backend.port }}
-          - path: /profiles
-            pathType: Prefix
-            backend:
-              service:
-                name: {{ .Release.Name }}-backend
-                port:
-                  number: {{ .Values.backend.port }}
-          - path: /projects
-            pathType: Prefix
-            backend:
-              service:
-                name: {{ .Release.Name }}-backend
-                port:
-                  number: {{ .Values.backend.port }}
-          - path: /git
-            pathType: Prefix
-            backend:
-              service:
-                name: {{ .Release.Name }}-backend
-                port:
-                  number: {{ .Values.backend.port }}
-          - path: /lineage
-            pathType: Prefix
-            backend:
-              service:
-                name: {{ .Release.Name }}-backend
-                port:
-                  number: {{ .Values.backend.port }}
-          - path: /artifacts
-            pathType: Prefix
-            backend:
-              service:
-                name: {{ .Release.Name }}-backend
-                port:
-                  number: {{ .Values.backend.port }}
-          - path: /schedules
-            pathType: Prefix
-            backend:
-              service:
-                name: {{ .Release.Name }}-backend
-                port:
-                  number: {{ .Values.backend.port }}
-          - path: /auth
-            pathType: Prefix
-            backend:
-              service:
-                name: {{ .Release.Name }}-backend
-                port:
-                  number: {{ .Values.backend.port }}
-          - path: /users
-            pathType: Prefix
-            backend:
-              service:
-                name: {{ .Release.Name }}-backend
-                port:
-                  number: {{ .Values.backend.port }}
-          - path: /plugins
-            pathType: Prefix
-            backend:
-              service:
-                name: {{ .Release.Name }}-backend
-                port:
-                  number: {{ .Values.backend.port }}
-          - path: /api
-            pathType: Prefix
-            backend:
-              service:
-                name: {{ .Release.Name }}-backend
-                port:
-                  number: {{ .Values.backend.port }}
-
-          # ===========================================
-          # Frontend - catches everything else
-          # ===========================================
+---
+# =============================================================================
+# Ingress 3: Frontend (catch-all)
+# Serves the React SPA for all non-API routes
+# =============================================================================
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ .Release.Name }}-frontend-ingress
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: frontend
+  annotations:
+    {{- with .Values.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  {{- if .Values.ingress.className }}
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- end }}
+  {{- if .Values.ingress.tls }}
+  tls:
+    {{- range .Values.ingress.tls }}
+    - hosts:
+        {{- range .hosts }}
+        - {{ . | quote }}
+        {{- end }}
+      secretName: {{ .secretName }}
+    {{- end }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
           - path: /
             pathType: Prefix
             backend:
