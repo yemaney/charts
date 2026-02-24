@@ -143,22 +143,19 @@ dbtProject:
 # =============================================================================
 ingress:
   # Enable/disable Ingress resource
-  enabled: false
+  enabled: true
 
   # Ingress class name (e.g., nginx, traefik, alb)
   className: "nginx"
 
   # Hostname for the Ingress
   # Example: dbt.example.com
-  host: "dbt.example.com"
+  host: "example.com"
 
   # Annotations for the Ingress
   # These vary by ingress controller
-  annotations:
+  annotations: {}
     # nginx ingress annotations
-    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
-    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
-    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
     # For AWS ALB ingress controller, use:
     # kubernetes.io/ingress.class: alb
     # alb.ingress.kubernetes.io/scheme: internet-facing
@@ -166,8 +163,8 @@ ingress:
 
     # TLS configuration (optional)
     # Uncomment to enable HTTPS
-  tls: []
-  #  - secretName: dbt-workbench-tls
-  #    hosts:
-  #      - dbt.example.com
+  tls: #[]
+   - secretName: dbt-workbench-tls
+     hosts:
+       - example.com
 

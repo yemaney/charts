@@ -54,7 +54,7 @@ spec:
               {{- if .Values.ingress.tls }}
               {{- $protocol = "https" }}
               {{- end }}
-              value: {{ printf "%s://%s/api" $protocol .Values.ingress.host | quote }}
+              value: {{ printf "%s://dbt-api.%s" $protocol .Values.ingress.host | quote }}
               {{- else }}
               value: {{ .Values.frontend.env.VITE_API_BASE_URL | quote }}
               {{- end }}

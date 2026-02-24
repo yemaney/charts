@@ -13,10 +13,6 @@ metadata:
     app.kubernetes.io/instance: {{ .Release.Name }}
     app.kubernetes.io/component: api
   annotations:
-    nginx.ingress.kubernetes.io/rewrite-target: /$2
-    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
-    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
-    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
     {{- with .Values.ingress.annotations }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
@@ -26,20 +22,16 @@ spec:
   {{- end }}
   {{- if .Values.ingress.tls }}
   tls:
-    {{- range .Values.ingress.tls }}
     - hosts:
-        {{- range .hosts }}
-        - {{ . | quote }}
-        {{- end }}
-      secretName: {{ .secretName }}
-    {{- end }}
+        - dbt-api.{{ .Values.ingress.host }}
+      secretName: dbt-api-tls
   {{- end }}
   rules:
-    - host: {{ .Values.ingress.host | quote }}
+    - host: dbt-api.{{ .Values.ingress.host }}
       http:
         paths:
-          - path: /api(/|$)(.*)
-            pathType: ImplementationSpecific
+          - path: /
+            pathType: Prefix
             backend:
               service:
                 name: {{ .Release.Name }}-backend
@@ -66,8 +58,14 @@ spec:
   {{- if .Values.ingress.className }}
   ingressClassName: {{ .Values.ingress.className }}
   {{- end }}
+  {{- if .Values.ingress.tls }}
+  tls:
+    - hosts:
+        - dbt-health.{{ .Values.ingress.host }}
+      secretName: dbt-health-tls
+  {{- end }}
   rules:
-    - host: {{ .Values.ingress.host | quote }}
+    - host: dbt-health.{{ .Values.ingress.host }}
       http:
         paths:
           - path: /health
@@ -114,16 +112,12 @@ spec:
   {{- end }}
   {{- if .Values.ingress.tls }}
   tls:
-    {{- range .Values.ingress.tls }}
     - hosts:
-        {{- range .hosts }}
-        - {{ . | quote }}
-        {{- end }}
-      secretName: {{ .secretName }}
-    {{- end }}
+        - dbt-frontend.{{ .Values.ingress.host }}
+      secretName: dbt-frontend-tls
   {{- end }}
   rules:
-    - host: {{ .Values.ingress.host | quote }}
+    - host: dbt-frontend.{{ .Values.ingress.host }}
       http:
         paths:
           - path: /
