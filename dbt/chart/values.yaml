@@ -13,8 +13,8 @@ backend:
     SCHEDULER_ENABLED: "true"
   # dbt Adapters to auto-install on startup
   # These will be installed via pip before the backend starts
-  #dbtAdapters:
-  #- dbt-trino
+  # dbtAdapters:
+  # - dbt-trino
 
   # Frontend configuration
 frontend:
@@ -163,8 +163,8 @@ ingress:
 
     # TLS configuration (optional)
     # Uncomment to enable HTTPS
-  tls: #[]
-   - secretName: dbt-workbench-tls
-     hosts:
-       - example.com
+  tls: []
+    # - secretName: dbt-workbench-tls
+    #   hosts:
+    #     - example.com
 
