@@ -11,6 +11,43 @@ Before starting, ensure you have the following installed and configured:
 - **Docker**: Docker installed and running.
 - **Trino**: A Trino instance must be present in the cluster with a **writable catalog** (e.g., `memory`, `hive`, etc.).
 
+## Installation Methods
+
+### Method 1: Install from GitHub Pages Repository (Recommended)
+
+Add the chart repository and install:
+
+```bash
+# Add the chart repository
+helm repo add dbt-workbench https://<org>.github.io/<repo>
+helm repo update
+
+# Install the chart
+helm install dbt-workbench-trino dbt-workbench/dbt-workbench-trino
+```
+
+### Method 2: Install from GitHub Releases
+
+Download and install a specific version:
+
+```bash
+# Download the chart
+helm pull https://<org>.github.io/<repo>/charts/dbt-workbench-trino-<version>.tgz
+
+# Extract and install
+tar -xzf dbt-workbench-trino-<version>.tgz
+helm install dbt-workbench-trino ./dbt-workbench-trino
+```
+
+### Method 3: Install from Local Chart
+
+If you have the chart source locally:
+
+```bash
+cd dbt-workbench-helm
+helm install dbt-workbench-trino dbt/chart
+```
+
 ## 1. Fast Track: Install Trino (Quick Test)
 
 If you don't have Trino running, use this command to install a test instance with a writable memory catalog:
