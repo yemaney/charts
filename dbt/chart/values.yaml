@@ -167,4 +167,3 @@ ingress:
     # - secretName: dbt-workbench-tls
     #   hosts:
     #     - example.com
-
